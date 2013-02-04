@@ -45,7 +45,7 @@ module NUnitMerge =
         }
 
     let CreateTestSummaryElement summary =
-        XElement.Parse (sprintf "<test-results name=\"Merged results\" total=\"%d\" errors=\"%d\" failures=\"%d\" not-run=\"%d\" inconclusive=\"%d\" skipped=\"%d\" invalid=\"%d\" date=\"%s\" time=\"%s\" />" summary.total summary.errors summary.failures summary.notrun summary.inconclusive summary.skipped summary.invalid (summary.datetime.ToString("yyyy-MM-dd")) (summary.datetime.ToString("HH:mm:ss")))
+        XElement.Parse (sprintf "<test-results name=\"Merged results\" total=\"%d\" errors=\"%d\" failures=\"%d\" not-run=\"%d\" inconclusive=\"%d\" skipped=\"%d\" ignored=\"%d\" invalid=\"%d\" date=\"%s\" time=\"%s\" />" summary.total summary.errors summary.failures summary.notrun summary.inconclusive summary.skipped summary.ignored summary.invalid (summary.datetime.ToString("yyyy-MM-dd")) (summary.datetime.ToString("HH:mm:ss")))
 
     type environment =
         {
