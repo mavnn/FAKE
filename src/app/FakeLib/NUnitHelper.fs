@@ -191,6 +191,21 @@ let NUnitDefaults =
       TimeOut = TimeSpan.FromMinutes 5.
       DisableShadowCopy = false}
 
+let commandLineBuilder parameters assemblies =
+    let cl = new StringBuilder()
+              |> append "-nologo"
+              |> appendIfTrue parameters.DisableShadowCopy "-noshadow" 
+              |> appendIfTrue parameters.ShowLabels "-labels" 
+              |> appendIfTrue parameters.TestInNewThread "-thread" 
+              |> appendFileNamesIfNotNull assemblies
+              |> appendIfNotNull parameters.IncludeCategory "-include:"
+              |> appendIfNotNull parameters.ExcludeCategory "-exclude:"
+              |> appendIfNotNull parameters.XsltTransformFile "-transform:"
+              |> appendIfNotNull parameters.OutputFile  "-xml:"
+              |> appendIfNotNull parameters.Framework  "-framework:"
+              |> appendIfNotNull parameters.ErrorOutputFile "-err:"
+    cl.ToString()
+
 /// Run NUnit on a group of assemblies.
 let NUnit setParams (assemblies: string seq) =
     let details = assemblies |> separated ", "
@@ -198,23 +213,10 @@ let NUnit setParams (assemblies: string seq) =
     let parameters = NUnitDefaults |> setParams
               
     let assemblies =  assemblies |> Seq.toArray
-    let commandLineBuilder =
-        new StringBuilder()
-          |> append "-nologo"
-          |> appendIfTrue parameters.DisableShadowCopy "-noshadow" 
-          |> appendIfTrue parameters.ShowLabels "-labels" 
-          |> appendIfTrue parameters.TestInNewThread "-thread" 
-          |> appendFileNamesIfNotNull assemblies
-          |> appendIfNotNull parameters.IncludeCategory "-include:"
-          |> appendIfNotNull parameters.ExcludeCategory "-exclude:"
-          |> appendIfNotNull parameters.XsltTransformFile "-transform:"
-          |> appendIfNotNull parameters.OutputFile  "-xml:"
-          |> appendIfNotNull parameters.Framework  "-framework:"
-          |> appendIfNotNull parameters.ErrorOutputFile "-err:"
 
     let tool = parameters.ToolPath @@ parameters.ToolName
 
-    let args = commandLineBuilder.ToString()
+    let args = commandLineBuilder parameters assemblies
     trace (tool + " " + args)
     let result =
         execProcessAndReturnExitCode (fun info ->  
@@ -231,4 +233,75 @@ let NUnit setParams (assemblies: string seq) =
             failwith "NUnit test failed."
         failwithf "NUnit test failed. Process finished with exit code %d." result
 
+type NUnitParallelResult =
+    {
+        AssemblyName : string
+        ErrorOut : StringBuilder
+        StandardOut : StringBuilder
+        ReturnCode : int
+        OutputFile : string
+    }
+
+let NUnitParallel setParams (assemblies: string seq) =
+    let details = assemblies |> separated ", "
+    traceStartTask "NUnitParallel" details
+    let parameters = NUnitDefaults |> setParams
               
+    let assemblies =  assemblies |> Seq.toArray
+
+    let tool = parameters.ToolPath @@ parameters.ToolName
+
+    let runSingleAssembly name parameters outputFile =
+        let args = commandLineBuilder { parameters with OutputFile = outputFile } [name]
+        let errout = StringBuilder()
+        let stdout = StringBuilder()
+        let result =
+            ExecProcessWithLambdas (fun info ->  
+                info.FileName <- tool
+                info.WorkingDirectory <- parameters.WorkingDir
+                info.Arguments <- args) 
+                parameters.TimeOut
+                true
+                (fun e -> errout.Append(e) |> ignore)                
+                (fun s -> stdout.Append(s) |> ignore)
+        { AssemblyName = name; ErrorOut = errout; StandardOut = stdout; ReturnCode = result; OutputFile = outputFile }
+
+    let testRunResults =
+        assemblies
+        |> Seq.map (fun assembly -> assembly, Path.GetTempFileName())
+        |> doParallelWithThrottle (Environment.ProcessorCount) (fun (assembly, outputFile) -> runSingleAssembly assembly parameters outputFile)
+
+    let workingDir = Seq.find (fun s -> s <> null && s <> "") [parameters.WorkingDir; environVar("teamcity.build.workingDir"); "."]
+
+    // Merge all valid results into single results file
+    if Array.Exists(testRunResults, fun r -> r.ReturnCode = 0)  then
+        testRunResults
+        |> Seq.filter (fun r -> r.ReturnCode = 0)
+        |> Seq.map (fun result -> result.OutputFile)
+        |> Seq.map (fun fileName -> XDocument.Parse(File.ReadAllText(fileName)))
+        |> NUnitMerge.FoldDocs
+        |> NUnitMerge.CreateMerged
+        |> fun x -> File.WriteAllText(workingDir @@ parameters.OutputFile, x.ToString())
+        sendTeamCityNUnitImport (workingDir @@ parameters.OutputFile)
+
+    // Deal with errors
+    let hasFailed = Array.Exists(testRunResults, fun r -> r.ReturnCode <> 0)
+    if hasFailed then
+        testRunResults
+        |> Seq.filter (fun r -> r.ReturnCode <> 0)
+        |> Seq.iter (fun r ->
+                        match r with
+                        | result when r.ReturnCode < 0 ->
+                            traceError <| sprintf "NUnit test run for %s returned error code %d, output to stderr was:" r.AssemblyName r.ReturnCode
+                            traceError <| r.ErrorOut.ToString()
+                        | result ->
+                            traceError <| sprintf "NUnit test run for %s reported failed tests, check outputfile %s for details." r.AssemblyName parameters.OutputFile)
+
+    // Make sure we delete the temp files
+    testRunResults
+    |> Seq.iter (fun result -> File.Delete(result.OutputFile))
+
+    if hasFailed then          
+        failwith "NUnitParallel test runs failed."
+    else
+        traceEndTask "NUnitParallel" details
